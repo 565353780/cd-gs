@@ -134,7 +134,6 @@ def readColmapCameras(
     resolution=1, 
     train_idx=None, 
     white_background=False,
-    depth_model_type=None,  # 'zoe', 'depthanything', None
     predefined_depth_path=None,
     confidence_map_output=True,
     debug_output=False,
@@ -206,103 +205,91 @@ def readColmapCameras(
         
         depthmap, depth_weight = None, None
         depthloss = 1e8
-        if depth_model_type is not None:
+        if pcd is not None and idx in train_idx:
+            depthmap = np.zeros((height, width))
+            depth_weight = np.zeros((height, width))
 
-            if pcd is not None and idx in train_idx:
-                depthmap = np.zeros((height, width))
-                depth_weight = np.zeros((height, width))
+            K = np.array([
+                [focal_length_x, 0, width/2],
+                [0, focal_length_y, height/2],
+                [0, 0, 1]
+            ])
 
-                K = np.array([
-                    [focal_length_x, 0, width/2],
-                    [0, focal_length_y, height/2],
-                    [0, 0, 1]
-                ])
+            cam_coord = np.matmul(K, np.matmul(R.transpose(), pcd.points.transpose()) + T.reshape(3,1)) ### for coordinate definition, see getWorld2View2() function
+            valid_idx = np.where(np.logical_and.reduce((
+                cam_coord[2]>0, 
+                cam_coord[0]/cam_coord[2]>=0, 
+                cam_coord[0]/cam_coord[2]<=width-1, 
+                cam_coord[1]/cam_coord[2]>=0, 
+                cam_coord[1]/cam_coord[2]<=height-1
+            )))[0]
 
-                cam_coord = np.matmul(K, np.matmul(R.transpose(), pcd.points.transpose()) + T.reshape(3,1)) ### for coordinate definition, see getWorld2View2() function
-                valid_idx = np.where(np.logical_and.reduce((
-                    cam_coord[2]>0, 
-                    cam_coord[0]/cam_coord[2]>=0, 
-                    cam_coord[0]/cam_coord[2]<=width-1, 
-                    cam_coord[1]/cam_coord[2]>=0, 
-                    cam_coord[1]/cam_coord[2]<=height-1
-                )))[0]
+            pts_depths = cam_coord[-1:, valid_idx]
+            cam_coord = cam_coord[:2, valid_idx]/cam_coord[-1:, valid_idx]
 
-                pts_depths = cam_coord[-1:, valid_idx]
-                cam_coord = cam_coord[:2, valid_idx]/cam_coord[-1:, valid_idx]
+            y_indices = np.round(cam_coord[1]).astype(np.int32).clip(0, height-1)
+            x_indices = np.round(cam_coord[0]).astype(np.int32).clip(0, width-1)
+            
+            depthmap[y_indices, x_indices] = pts_depths
+            depth_weight[y_indices, x_indices] = 1/pcd.errors[valid_idx] if pcd.errors is not None else 1
+            depth_weight = depth_weight/depth_weight.max()
 
-                y_indices = np.round(cam_coord[1]).astype(np.int32).clip(0, height-1)
-                x_indices = np.round(cam_coord[0]).astype(np.int32).clip(0, width-1)
+            # Try to load predefined depth if requested
+            source_depth = None
+            depth_file = os.path.join(predefined_depth_path, f'{image_name}.npy')
+            if os.path.exists(depth_file):
+                loaded_depth = np.load(depth_file)
+                if isinstance(loaded_depth, dict) and 'depth' in loaded_depth:
+                    source_depth = loaded_depth['depth']
+                else:
+                    source_depth = loaded_depth
                 
-                depthmap[y_indices, x_indices] = pts_depths
-                depth_weight[y_indices, x_indices] = 1/pcd.errors[valid_idx] if pcd.errors is not None else 1
-                depth_weight = depth_weight/depth_weight.max()
+                if source_depth.shape != (height, width):
+                    from scipy.ndimage import zoom
+                    h_ratio = height / source_depth.shape[0]
+                    w_ratio = width / source_depth.shape[1]
+                    source_depth = zoom(source_depth, (h_ratio, w_ratio), order=1)
+            assert source_depth is not None
+            
+            target=depthmap.copy()
+            target=((target != 0) * 255).astype(np.uint8)
+            depthmap, depthloss = optimize_depth(source=source_depth, target=depthmap, mask=depthmap>0.0, depth_weight=depth_weight)
 
-                # Try to load predefined depth if requested
-                source_depth = None
-                depth_file = os.path.join(predefined_depth_path, f'{image_name}.npy')
-                if os.path.exists(depth_file):
-                    loaded_depth = np.load(depth_file)
-                    if isinstance(loaded_depth, dict) and 'depth' in loaded_depth:
-                        source_depth = loaded_depth['depth']
-                    else:
-                        source_depth = loaded_depth
+            # Generate debug outputs if requested
+            if debug_output:
+                import cv2
+                from render import depth_colorize_with_mask
                     
-                    if source_depth.shape != (height, width):
-                        from scipy.ndimage import zoom
-                        h_ratio = height / source_depth.shape[0]
-                        w_ratio = width / source_depth.shape[1]
-                        source_depth = zoom(source_depth, (h_ratio, w_ratio), order=1)
-                
-                # Fall back to depth estimation models if needed
-                if source_depth is None and depth_model_type:
-                    if depth_model_type == 'zoe' and model_zoe:
-                        source_depth = model_zoe.infer_pil(image.convert("RGB"))
-                            
-                    elif depth_model_type == 'depthanything' and model_depthanything:
-                        raw_img = np.array(image.convert("RGB"))
-                        source_depth = model_depthanything.infer_image(raw_img)
-                        if isinstance(source_depth, torch.Tensor):
-                            source_depth = source_depth.cpu().numpy()
+                source, refined = depth_colorize_with_mask(source_depth[None,:,:]).squeeze(), depth_colorize_with_mask(depthmap[None,:,:]).squeeze()
+                    
+                cv2.imwrite(f"{debug_dir}/{idx:03d}_source.png", (source[:,:,::-1]*255).astype(np.uint8))
+                cv2.imwrite(f"{debug_dir}/{idx:03d}_refined.png", (refined[:,:,::-1]*255).astype(np.uint8))
+                cv2.imwrite(f"{debug_dir}/{idx:03d}_target.png", target)
+                    
+                # Save refined depth as .npy file
+                refined_npy_path = os.path.join(f"{debug_dir}/{image_name}_aligned.npy")
+                np.save(refined_npy_path, depthmap)
 
-                target=depthmap.copy()
-                target=((target != 0) * 255).astype(np.uint8)
-                depthmap, depthloss = optimize_depth(source=source_depth, target=depthmap, mask=depthmap>0.0, depth_weight=depth_weight)
+            # Calculate and save confidence maps if requested
+            if confidence_map_output:
+                import cv2
+                confidence_map = calculate_confidence(depthmap, image)
 
-                # Generate debug outputs if requested
-                if debug_output:
-                    import cv2
-                    from render import depth_colorize_with_mask
-                        
-                    source, refined = depth_colorize_with_mask(source_depth[None,:,:]).squeeze(), depth_colorize_with_mask(depthmap[None,:,:]).squeeze()
-                        
-                    cv2.imwrite(f"{debug_dir}/{idx:03d}_source.png", (source[:,:,::-1]*255).astype(np.uint8))
-                    cv2.imwrite(f"{debug_dir}/{idx:03d}_refined.png", (refined[:,:,::-1]*255).astype(np.uint8))
-                    cv2.imwrite(f"{debug_dir}/{idx:03d}_target.png", target)
-                        
-                    # Save refined depth as .npy file
-                    refined_npy_path = os.path.join(f"{debug_dir}/{image_name}_aligned.npy")
-                    np.save(refined_npy_path, depthmap)
-
-                # Calculate and save confidence maps if requested
-                if confidence_map_output:
-                    import cv2
-                    confidence_map = calculate_confidence(depthmap, image)
-
-                    if confidence_map.shape != (resized_height, resized_width):
-                        from scipy.ndimage import zoom
-                        h_ratio = resized_height / confidence_map.shape[0]
-                        w_ratio = resized_width / confidence_map.shape[1]
-                        confidence_map = zoom(confidence_map, (h_ratio, w_ratio), order=1)
-                        
-                    # Save the confidence map as .npy file
-                    confidence_npy_path = os.path.join(confidence_map_dir, f"{image_name}_confidence.npy")
-                    np.save(confidence_npy_path, confidence_map)
-                        
-                    # Save the confidence map as a .png file for visualization
-                    confidence_png_path = os.path.join(confidence_vis_dir, f"{image_name}_confidence.png")
-                    confidence_map_normalized = (confidence_map * 255).astype(np.uint8)
-                    confidence_heatmap = cv2.applyColorMap(confidence_map_normalized, cv2.COLORMAP_JET)
-                    cv2.imwrite(confidence_png_path, confidence_heatmap)
+                if confidence_map.shape != (resized_height, resized_width):
+                    from scipy.ndimage import zoom
+                    h_ratio = resized_height / confidence_map.shape[0]
+                    w_ratio = resized_width / confidence_map.shape[1]
+                    confidence_map = zoom(confidence_map, (h_ratio, w_ratio), order=1)
+                    
+                # Save the confidence map as .npy file
+                confidence_npy_path = os.path.join(confidence_map_dir, f"{image_name}_confidence.npy")
+                np.save(confidence_npy_path, confidence_map)
+                    
+                # Save the confidence map as a .png file for visualization
+                confidence_png_path = os.path.join(confidence_vis_dir, f"{image_name}_confidence.png")
+                confidence_map_normalized = (confidence_map * 255).astype(np.uint8)
+                confidence_heatmap = cv2.applyColorMap(confidence_map_normalized, cv2.COLORMAP_JET)
+                cv2.imwrite(confidence_png_path, confidence_heatmap)
           
         cam_info = CameraInfo(uid=uid, R=R, T=T, FovY=FovY, FovX=FovX, image=image, depth=depthmap, depth_weight=depth_weight,
                               image_path=image_path, image_name=image_name, width=width, height=height, depthloss=depthloss)
@@ -686,39 +673,46 @@ def pick_idx_from_360(path, train_idx, kshot, center, num_trials=100_000):
 def readColmapSceneInfo(
     path, 
     images, 
-    eval, 
-    kshot=1000, 
     seed=0, 
     resolution=4, 
     white_background=False,
-
-    depth_model_type=None,
     predefined_depth_path=None,
     confidence_map_output=True,
     debug_output=False,
     debug_dir="debug"
 ):
-    ## load split_idx.json 
-    with open(os.path.join(path, "split_index.json"), "r") as jf:
-        jsonf = json.load(jf)
-        train_idx, test_idx = jsonf["train"], jsonf["test"]
-    
+    try:
+        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.bin")
+        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.bin")
+        cam_extrinsics = read_extrinsics_binary(cameras_extrinsic_file)
+        cam_intrinsics = read_intrinsics_binary(cameras_intrinsic_file)
+    except:
+        cameras_extrinsic_file = os.path.join(path, "sparse/0", "images.txt")
+        cameras_intrinsic_file = os.path.join(path, "sparse/0", "cameras.txt")
+        cam_extrinsics = read_extrinsics_text(cameras_extrinsic_file)
+        cam_intrinsics = read_intrinsics_text(cameras_intrinsic_file)
+
     reading_dir = "images" if images == None else images
 
-    scene_center_path = os.path.join(path, "center.npy")
-    
     np.random.seed(seed)
-    if os.path.exists(scene_center_path) and eval:
-        train_idx = pick_idx_from_360(path, train_idx, kshot, center=np.load(scene_center_path))
-    else:
-        train_idx = sorted(np.random.choice(train_idx, size=min(kshot, len(train_idx)), replace=False)) if eval else np.arange(len(train_idx)).tolist()
-    
-    ### refineColmapWithIndex() remove the cameras and features except the train set
-    ply_path, cam_extrinsics, cam_intrinsics = refineColmapWithIndex(path, train_idx)
-    
+    train_idx = np.arange(len(os.listdir(path + '/' + images))).tolist()
+
     ### making pcd with the features captured from train_cam
-    pcd = fetchPly(ply_path)
-    
+    ply_path = os.path.join(path, f"sparse/0/points3D.ply")
+    bin_path = os.path.join(path, f"sparse/0/points3D.bin")
+    txt_path = os.path.join(path, f"sparse/0/points3D.txt")
+    if not os.path.exists(ply_path):
+        print("Converting point3d.bin to .ply, will happen only the first time you open the scene.")
+        try:
+            xyz, rgb, _ = read_points3D_binary(bin_path)
+        except:
+            xyz, rgb, _ = read_points3D_text(txt_path)
+        storePly(ply_path, xyz, rgb)
+    try:
+        pcd = fetchPly(ply_path)
+    except:
+        pcd = None
+
     cam_infos = readColmapCameras(
         cam_extrinsics=cam_extrinsics, 
         cam_intrinsics=cam_intrinsics, 
@@ -727,20 +721,14 @@ def readColmapSceneInfo(
         resolution=resolution, 
         train_idx=train_idx, 
         white_background=white_background,
-
-        depth_model_type=depth_model_type,
         predefined_depth_path=predefined_depth_path,
         confidence_map_output=confidence_map_output,
         debug_output=debug_output,
         debug_dir=debug_dir
     ).copy()
 
-    if eval:
-        train_cam_infos = [cam_infos[i] for i in train_idx]
-        test_cam_infos = [cam_infos[i] for i in test_idx]
-    else:
-        train_cam_infos = cam_infos
-        test_cam_infos = []     
+    train_cam_infos = cam_infos
+    test_cam_infos = []     
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
