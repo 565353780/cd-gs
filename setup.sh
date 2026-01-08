@@ -1,5 +1,6 @@
 cd ..
 git clone --depth 1 https://github.com/facebookresearch/pytorch3d.git
+git clone --depth 1 --recursive https://github.com/NVlabs/tiny-cuda-nn.git
 
 pip install ninja
 
@@ -11,7 +12,10 @@ pip install plyfile tqdm matplotlib opencv-python joblib timm
 cd pytorch3d
 python setup.py install
 
-cd ../cd-gs/submodules/diff-gaussian-rasterization-depth-acc
+cd ../tiny-cuda-nn/bindings/torch
+python setup.py install
+
+cd ../../../cd-gs/submodules/diff-gaussian-rasterization-depth-acc
 python setup.py install
 
 cd ../simple-knn
