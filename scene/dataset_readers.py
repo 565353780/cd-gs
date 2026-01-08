@@ -36,7 +36,6 @@ from scene.gaussian_model import BasicPointCloud
 import imageio
 from datetime import datetime
 from tqdm import tqdm
-from DepthAnythingV2.depth_anything_v2.dpt import DepthAnythingV2
 from scipy.stats import entropy
 
 class CameraInfo(NamedTuple):
@@ -136,7 +135,6 @@ def readColmapCameras(
     train_idx=None, 
     white_background=False,
     depth_model_type=None,  # 'zoe', 'depthanything', None
-    use_predefined_depth=False,
     predefined_depth_path=None,
     confidence_map_output=True,
     debug_output=False,
@@ -150,23 +148,6 @@ def readColmapCameras(
     # Create debug directory if needed
     if debug_output:
         os.makedirs(debug_dir, exist_ok=True)
-
-    # Initialize depth estimation model if requested
-    if depth_model_type and not use_predefined_depth:
-        if depth_model_type == 'zoe':
-            model_zoe = torch.hub.load("./ZoeDepth", "ZoeD_NK", source="local", pretrained=True).to('cuda')
-        elif depth_model_type == 'depthanything':
-            # Initialize DepthAnythingV2 model
-            model_configs = {
-                'vits': {'encoder': 'vits', 'features': 64, 'out_channels': [48, 96, 192, 384]},
-                'vitb': {'encoder': 'vitb', 'features': 128, 'out_channels': [96, 192, 384, 768]},
-                'vitl': {'encoder': 'vitl', 'features': 256, 'out_channels': [256, 512, 1024, 1024]},
-                'vitg': {'encoder': 'vitg', 'features': 384, 'out_channels': [1536, 1536, 1536, 1536]}
-            }
-            encoder = 'vitb'
-            model_depthanything = DepthAnythingV2(**model_configs[encoder])
-            model_depthanything.load_state_dict(torch.load('./DepthAnythingV2/depth_anything_v2_vitb.pth', map_location='cpu'))
-            model_depthanything = model_depthanything.to('cuda').eval()
 
     dataset_base_path = os.path.dirname(os.path.dirname(images_folder))
     dataset_name = os.path.basename(os.path.dirname(images_folder))
@@ -258,20 +239,19 @@ def readColmapCameras(
 
                 # Try to load predefined depth if requested
                 source_depth = None
-                if use_predefined_depth and predefined_depth_path:
-                    depth_file = os.path.join(predefined_depth_path, f'{image_name}.npy')
-                    if os.path.exists(depth_file):
-                        loaded_depth = np.load(depth_file)
-                        if isinstance(loaded_depth, dict) and 'depth' in loaded_depth:
-                            source_depth = loaded_depth['depth']
-                        else:
-                            source_depth = loaded_depth
-                        
-                        if source_depth.shape != (height, width):
-                            from scipy.ndimage import zoom
-                            h_ratio = height / source_depth.shape[0]
-                            w_ratio = width / source_depth.shape[1]
-                            source_depth = zoom(source_depth, (h_ratio, w_ratio), order=1)
+                depth_file = os.path.join(predefined_depth_path, f'{image_name}.npy')
+                if os.path.exists(depth_file):
+                    loaded_depth = np.load(depth_file)
+                    if isinstance(loaded_depth, dict) and 'depth' in loaded_depth:
+                        source_depth = loaded_depth['depth']
+                    else:
+                        source_depth = loaded_depth
+                    
+                    if source_depth.shape != (height, width):
+                        from scipy.ndimage import zoom
+                        h_ratio = height / source_depth.shape[0]
+                        w_ratio = width / source_depth.shape[1]
+                        source_depth = zoom(source_depth, (h_ratio, w_ratio), order=1)
                 
                 # Fall back to depth estimation models if needed
                 if source_depth is None and depth_model_type:
@@ -713,7 +693,6 @@ def readColmapSceneInfo(
     white_background=False,
 
     depth_model_type=None,
-    use_predefined_depth=False,
     predefined_depth_path=None,
     confidence_map_output=True,
     debug_output=False,
@@ -750,7 +729,6 @@ def readColmapSceneInfo(
         white_background=white_background,
 
         depth_model_type=depth_model_type,
-        use_predefined_depth=use_predefined_depth,
         predefined_depth_path=predefined_depth_path,
         confidence_map_output=confidence_map_output,
         debug_output=debug_output,

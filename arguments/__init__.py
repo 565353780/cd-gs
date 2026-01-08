@@ -59,7 +59,6 @@ class ModelParams(ParamGroup):
         self.kshot = 1000 # a large number
 
         self.depth_model_type = 'depthanything'
-        self.use_predefined_depth = False
         self.predefined_depth_path = None
         self.confidence_map_output = True
         self.debug_output = True

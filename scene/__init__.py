@@ -51,7 +51,6 @@ class Scene:
                 white_background=args.white_background,
 
                 depth_model_type=args.depth_model_type if hasattr(args, 'depth_model_type') else None,
-                use_predefined_depth=args.use_predefined_depth if hasattr(args, 'use_predefined_depth') else False,
                 predefined_depth_path=args.predefined_depth_path if hasattr(args, 'predefined_depth_path') else None,
                 confidence_map_output=args.confidence_map_output if hasattr(args, 'confidence_map_output') else True,
                 debug_output=args.debug_output if hasattr(args, 'debug_output') else False,
