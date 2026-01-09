@@ -32,11 +32,7 @@ from utils.loss_utils import ssim
 from lpipsPyTorch import lpips
 
 
-try:
-    from torch.utils.tensorboard import SummaryWriter
-    TENSORBOARD_FOUND = True
-except ImportError:
-    TENSORBOARD_FOUND = False
+from torch.utils.tensorboard import SummaryWriter
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, usedepth=False, usedepthReg=False):
     first_iter = 0
@@ -59,7 +55,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_imageloss_for_log = 0.0
     current_depth_weight = 0.0
 
-    ema_depthloss_for_log, prev_depthloss, deploss = 0.0, 1e2, torch.zeros(1)
+    ema_depthloss_for_log, deploss = 0.0, torch.zeros(1)
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -176,18 +172,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                     tb_writer.add_scalar('training_ema/total_loss_ema', ema_loss_for_log, iteration)
                 else:
                     print(f"[Warning] tb_writer is None at iteration {iteration}. Skipping logging.")
-            
-            ## Early stop from DRGS
-            # if iteration % 100 == 0:
-            #     if iteration > opt.min_iters and ema_depthloss_for_log > prev_depthloss:
-            #         training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), [iteration], scene, render, 
-            #                         (pipe, background), txt_path = os.path.join(args.model_path, "metric.txt"))
-            #         scene.save(iteration)
-            #         print(f"!!! Stop Point: {iteration} !!!")
-            #         break
-            #     else:
-            #         prev_depthloss = ema_depthloss_for_log
-            
+
             if iteration == opt.iterations:
                 progress_bar.close()
 
@@ -236,11 +221,7 @@ def prepare_output_and_logger(args):
         cfg_log_f.write(str(Namespace(**vars(args))))
 
     # Create Tensorboard writer
-    tb_writer = None
-    if TENSORBOARD_FOUND:
-        tb_writer = SummaryWriter(args.model_path)
-    else:
-        print("Tensorboard not available: not logging progress")
+    tb_writer = SummaryWriter(args.model_path)
     return tb_writer
 
 def training_report(tb_writer, iteration, Ll1, loss, l1_loss, deploss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, txt_path=None):
